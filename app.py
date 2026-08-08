@@ -12,10 +12,16 @@ Deploy as a Databricks App using app.yaml.
 import logging
 import os
 import re
+from functools import lru_cache
 
 import requests
 from databricks.sdk import WorkspaceClient
+from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
+
+# Load .env before any os.environ reads below, so local development can
+# override the Databricks secret scope with LAKEBASE_URL / MASSIVE_API_KEY.
+load_dotenv()
 
 import lakebase
 from massive_client import MassiveClient
@@ -24,7 +30,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("massive-app")
 
 app = Flask(__name__)
-_w = WorkspaceClient()
+
+
+@lru_cache(maxsize=1)
+def _client() -> WorkspaceClient:
+    """Build the Databricks client on first use. Only needed to resolve the
+    current user locally - Databricks Apps supply the X-Forwarded-Email header."""
+    return WorkspaceClient()
 
 TABLE_NAME = os.environ.get("MASSIVE_TABLE_NAME", "massive_records")
 WATCHLIST_TABLE_NAME = os.environ.get("WATCHLIST_TABLE_NAME", "watchlist")
@@ -109,12 +121,18 @@ def _current_user_email() -> str:
 
     Databricks Apps inject the logged-in user's identity via the
     X-Forwarded-Email header on every request. Fall back to the Databricks
-    SDK's current_user API for local development where that header isn't set.
+    SDK's current_user API for local development where that header isn't set,
+    and finally to LOCAL_USER_EMAIL so the app still works locally with no
+    Databricks auth configured at all.
     """
     header_email = request.headers.get("X-Forwarded-Email")
     if header_email:
         return header_email
-    return _w.current_user.me().user_name
+    try:
+        return _client().current_user.me().user_name
+    except Exception:
+        logger.info("No Databricks auth available; using LOCAL_USER_EMAIL.")
+        return os.getenv("LOCAL_USER_EMAIL", "local@dev")
 
 
 @app.route("/healthz")
@@ -409,5 +427,8 @@ def _upsert_news_batch(ticker: str, articles: list[dict]) -> int:
 if __name__ == '__main__':
     host = os.getenv('FLASK_RUN_HOST', '0.0.0.0')
     port = int(os.getenv('FLASK_RUN_PORT', 8000))
-    app.run(debug=True, host=host, port=port)
-    print(f"Flask app running on http://{host}:{port}")
+    # Debug (with the interactive reloader) is on by default for local runs;
+    # app.yaml sets FLASK_DEBUG=0 so the deployed app doesn't expose it.
+    debug = os.getenv('FLASK_DEBUG', '1') == '1'
+    logger.info("Starting Flask on http://%s:%s (debug=%s)", host, port, debug)
+    app.run(debug=debug, host=host, port=port)

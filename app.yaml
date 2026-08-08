@@ -13,3 +13,6 @@ env:
     value: "massive"
   - name: MASSIVE_SECRET_KEY
     value: "api-key"
+  # Never run Flask's debug server / interactive reloader in the deployed app.
+  - name: FLASK_DEBUG
+    value: "0"

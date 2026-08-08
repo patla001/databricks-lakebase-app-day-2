@@ -54,41 +54,100 @@ A minimal Databricks App that:
 
 ### 3. Store your secrets
 
-Run once from a **Databricks notebook** in your workspace (no CLI needed):
+`setup_secrets.py` creates both secret scopes and stores your two credentials. It
+is idempotent — re-running it is safe.
 
-1. Create a new notebook (or open the Git folder you'll create in step 5, once it's cloned) and attach it to any running cluster.
-2. In a cell, run:
+> ⚠️ **Do not use `%sh python setup_secrets.py`.** The `%sh` magic runs the script
+> in a subshell with no TTY, so the password prompt never reaches you and the cell
+> hangs forever. Use one of the two options below.
 
-   ```python
-   %sh python setup_secrets.py
-   ```
+**Option A — Databricks notebook (no CLI needed).** Create a notebook in the Git
+folder from step 7 (or import the repo first), attach it to a cluster, and run
+this in a **Python** cell:
 
-   or open a terminal from the notebook (**Run** > **Open terminal**, if enabled on your cluster) and run `python setup_secrets.py` there.
+```python
+exec(open("setup_secrets.py").read())
+```
 
-This prompts (via `getpass`, so nothing is echoed or written to disk/shell history) for:
-- Your **Massive API key** (from step 1) → stored as secret `massive/api-key`
+Notebook Python cells support interactive `input()`, so you'll get prompts for
+your Lakebase URL and Massive API key. They echo in plaintext — clear the cell
+output when you're done.
+
+**Option B — your own terminal (input is masked).** Requires Databricks auth for
+the SDK: create a personal access token in **Settings > Developer > Access
+tokens**, then:
+
+```bash
+export DATABRICKS_HOST=https://<your-workspace>.cloud.databricks.com
+export DATABRICKS_TOKEN=<your-pat>
+python setup_secrets.py
+```
+
+Either way you're prompted for:
 - Your **Lakebase connection URL** (from step 2) → stored as secret `database/lakebase-url`
+- Your **Massive API key** (from step 1) → stored as secret `massive/api-key`
+
+The script prints the stored key names (never the values) at the end so you can
+confirm it worked. To skip the prompts entirely, pre-set `LAKEBASE_URL` and
+`MASSIVE_API_KEY` in the environment.
+
+### 3b. Grant the role permission to create tables
+
+Run `sql/00_grant_app_role.sql` once against your Lakebase instance, as your own
+Databricks identity (it belongs to `databricks_superuser`) — use the Databricks
+SQL editor connected to the instance:
+
+```sql
+GRANT CREATE ON SCHEMA public TO massive_app;
+```
+
+Skip this and the app starts fine but every database call fails with
+`permission denied for schema public`. As of PostgreSQL 15 the `public` schema
+no longer grants `CREATE` to all roles, so a new Lakebase password role gets
+`USAGE` but not `CREATE`, and the `ensure_*_table()` helpers in `app.py` can't
+create their tables.
 
 ### 4. Configure environment variables (local dev)
-
-Copy `.env.example` to `.env` and paste your Lakebase URL as `LAKEBASE_URL` for local runs:
 
 ```bash
 cp .env.example .env
 ```
 
-For deployment, `app.yaml` already pulls `LAKEBASE_URL` from the `database/lakebase-url` secret automatically — no manual editing needed there.
+Then fill in `LAKEBASE_URL` and `MASSIVE_API_KEY` in `.env`. These are **local-dev
+overrides**: when they're set, the app connects directly and never contacts
+Databricks — which means you can run locally without any Databricks auth at all.
+Leave them unset and the app falls back to reading the secret scopes.
+
+On Databricks Apps there is no `.env`. `app.yaml` passes the scope and key *names*
+(`LAKEBASE_SECRET_SCOPE` / `LAKEBASE_SECRET_KEY`, etc.) and the app's service
+principal reads the secret values at runtime via the SDK — so make sure that
+principal has READ on both scopes.
 
 ### 5. Install dependencies
 
+This project uses [uv](https://docs.astral.sh/uv/) with Python 3.13:
+
 ```bash
-pip install -r requirements.txt
+uv venv
+uv pip install -r requirements.txt
 ```
+
+(Plain `pip install -r requirements.txt` works too. Note `pyproject.toml` has an
+empty `dependencies` list — `requirements.txt` is the source of truth, so
+`uv sync` will not install anything.)
 
 ### 6. Run locally
 
 ```bash
 python app.py
+```
+
+Then open http://localhost:8000. The `watchlist` table is created automatically on
+the first request — no manual SQL needed for the UI. Sanity check:
+
+```bash
+curl localhost:8000/healthz     # {"status":"ok"}
+curl localhost:8000/watchlist   # [] on a fresh database
 ```
 
 ### 7. Create a Git folder in Databricks and deploy the app (no CLI required)
@@ -107,7 +166,7 @@ All of this is done through the Databricks workspace UI:
 
 3. **Point the app at your Git folder**:
    - When prompted for the source code location, select **Workspace files** / **Git folder** and browse to the Git folder you created in step 1 (the folder containing `app.py` and `app.yaml`).
-   - Databricks will read `app.yaml` from that folder automatically to configure the `command` and `env` (including the `LAKEBASE_URL`, `MASSIVE_API_BASE_URL`, and secret scope/key references).
+   - Databricks will read `app.yaml` from that folder automatically to configure the `command` and `env` (the secret scope/key *names* plus `MASSIVE_API_BASE_URL`). The app's service principal resolves the actual secret values at runtime, so grant it READ on the `database` and `massive` scopes.
 
 4. **Deploy**:
    - Click **Deploy** (or **Create and deploy**) in the Apps UI. Databricks will build and start the app using the Git folder's current contents — no `databricks` CLI commands are needed.

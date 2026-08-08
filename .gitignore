@@ -1,6 +1,16 @@
+# Secrets - never commit. The trailing-variant patterns matter: plain `.env`
+# does not match .env.bak / .env.local / .env.save, which editors and shell
+# redirects create readily.
 .env
+.env.*
+env.dms
+.env.dms
+!.env.example
+
 __pycache__/
 *.pyc
 .venv/
 venv/
 .idea/
+.vscode/
+.DS_Store

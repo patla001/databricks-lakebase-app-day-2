@@ -2,18 +2,17 @@
 Client for the Massive API.
 
 The API key is stored in a Databricks secret scope (see setup_secrets.py) and
-resolved at runtime via the Databricks SDK - it is never stored in code, env
-files, or app.yaml.
+resolved at runtime via the Databricks SDK - it is never stored in code or
+app.yaml. For local development, MASSIVE_API_KEY (via .env) takes precedence.
 """
 
 import base64
 import os
+from functools import lru_cache
 from typing import Any
 
 import requests
 from databricks.sdk import WorkspaceClient
-
-_w = WorkspaceClient()
 
 _SCOPE = os.environ.get("MASSIVE_SECRET_SCOPE", "massive")
 _KEY = os.environ.get("MASSIVE_SECRET_KEY", "api-key")
@@ -22,9 +21,19 @@ _BASE_URL = os.environ.get("MASSIVE_API_BASE_URL", "https://api.massive.com")
 _DEFAULT_TIMEOUT = 30
 
 
+@lru_cache(maxsize=1)
+def _client() -> WorkspaceClient:
+    """Build the Databricks client on first use, so importing this module
+    doesn't require Databricks auth when MASSIVE_API_KEY is set locally."""
+    return WorkspaceClient()
+
+
 def _get_api_key() -> str:
-    """Fetch and decode the Massive API key from the Databricks secret scope."""
-    secret = _w.secrets.get_secret(scope=_SCOPE, key=_KEY)
+    """Return the Massive API key from the env var or the Databricks secret scope."""
+    key = os.environ.get("MASSIVE_API_KEY")
+    if key:
+        return key
+    secret = _client().secrets.get_secret(scope=_SCOPE, key=_KEY)
     return base64.b64decode(secret.value).decode("utf-8")
 
 

@@ -120,7 +120,7 @@ print(f"Using model {EMBEDDING_MODEL_NAME!r} -> {EMBEDDING_DIM}-dim vectors")
 
 # DBTITLE 1,Parse Lakebase Connection Info
 import base64
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from databricks.sdk import WorkspaceClient
 
@@ -140,7 +140,10 @@ db_host = parsed.hostname
 db_port = parsed.port or 5432
 db_name = parsed.path.lstrip('/')
 db_user = parsed.username
-db_password = parsed.password
+# unquote: psycopg2 keyword args take the literal password, but the URL carries
+# it percent-encoded. Without this, a password containing %, @, : or / would be
+# passed through still-encoded and fail with "password authentication failed".
+db_password = unquote(parsed.password) if parsed.password else None
 
 print(f"Connection details:")
 print(f"  Host: {db_host}:{db_port}")

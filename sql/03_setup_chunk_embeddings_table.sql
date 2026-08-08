@@ -1,12 +1,12 @@
 -- Setup script for ticker_news_chunk_embeddings table
 -- Run this manually in your Lakebase Postgres database before running the notebook
--- Replace {{EMBEDDING_DIM}} with your model's dimension (e.g., 384 for all-MiniLM-L6-v2)
 
 -- Enable pgvector extension (if not already enabled)
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- Create the chunk embeddings table
--- IMPORTANT: Replace {{EMBEDDING_DIM}} below with the correct dimension for your model:
+-- VECTOR(384) must match the dimension used in 02_setup_embeddings_table.sql
+-- and the model in the job config (all-MiniLM-L6-v2 -> 384):
 --   - sentence-transformers/all-MiniLM-L6-v2: 384
 --   - sentence-transformers/all-mpnet-base-v2: 768
 --   - BAAI/bge-small-en-v1.5: 384
@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS ticker_news_chunk_embeddings (
     ticker TEXT NOT NULL,
     chunk_index INT NOT NULL,
     chunk_text TEXT NOT NULL,
-    embedding VECTOR({{EMBEDDING_DIM}}) NOT NULL,
+    embedding VECTOR(384) NOT NULL,
     model_name TEXT NOT NULL,
     embedded_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

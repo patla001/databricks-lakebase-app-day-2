@@ -5,26 +5,41 @@ Connects using a single LAKEBASE_URL (a standard Postgres connection URL,
 e.g. postgresql://role:password@host:5432/databricks_postgres?sslmode=require)
 pointing at a native Postgres role with a static, non-expiring password.
 This keeps setup to a single secret instead of five separate env vars.
+
+The URL comes from LAKEBASE_URL when set (local development, via .env), and
+otherwise from the Databricks secret scope (how the deployed app reads it).
 """
 
 import base64
 import os
 from contextlib import contextmanager
+from functools import lru_cache
 
 import psycopg2
 from databricks.sdk import WorkspaceClient
 from psycopg2.extras import RealDictCursor
 from sqlalchemy import create_engine
 
-_w = WorkspaceClient()
-
 _SCOPE = os.environ.get("LAKEBASE_SECRET_SCOPE", "database")
 _KEY = os.environ.get("LAKEBASE_SECRET_KEY", "lakebase-url")
 
 
+@lru_cache(maxsize=1)
+def _client() -> WorkspaceClient:
+    """Build the Databricks client on first use.
+
+    Constructed lazily so that importing this module doesn't require Databricks
+    auth - a local run with LAKEBASE_URL set never needs a workspace at all.
+    """
+    return WorkspaceClient()
+
+
 def _lakebase_url() -> str:
-    """Fetch and decode the Lakebase connection URL from the Databricks secret scope."""
-    secret = _w.secrets.get_secret(scope=_SCOPE, key=_KEY)
+    """Return the Lakebase connection URL from the env var or the secret scope."""
+    url = os.environ.get("LAKEBASE_URL")
+    if url:
+        return url
+    secret = _client().secrets.get_secret(scope=_SCOPE, key=_KEY)
     return base64.b64decode(secret.value).decode("utf-8")
 
 
