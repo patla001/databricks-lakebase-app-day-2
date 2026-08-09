@@ -1,7 +1,7 @@
 # SQL Setup Files for Lakebase
 
 Run these against your Lakebase Postgres database before running the
-`ingest_ticker_news_embeddings` notebook.
+`lakebase_embeddings` notebook.
 
 ## Setup Order
 
@@ -79,17 +79,17 @@ index strategy.
 **Embedding dimension:** both files declare `VECTOR(384)`, matching the default
 model `sentence-transformers/all-MiniLM-L6-v2`. If you change `embedding_model`
 in the job config, change the dimension to match and recreate the tables. The
-notebook's `match`/`case` block is the source of truth:
+`MODEL_DIMS` map in `notebooks/lakebase_embeddings.py` is the source of truth,
+and the notebook's preflight cell refuses to run on a mismatch:
 
 | model | dim |
 |---|---|
 | `sentence-transformers/all-MiniLM-L6-v2` | 384 |
+| `sentence-transformers/all-MiniLM-L12-v2` | 384 |
 | `sentence-transformers/all-mpnet-base-v2` | 768 |
 | `BAAI/bge-small-en-v1.5` | 384 |
 | `BAAI/bge-base-en-v1.5` | 768 |
 | `BAAI/bge-large-en-v1.5` | 1024 |
-| `text-embedding-3-small` | 1536 |
-| `text-embedding-3-large` | 3072 |
 
 ## After the notebook: `04_verify_embeddings.sql`
 
@@ -98,10 +98,11 @@ smoke test.
 
 **No cast step is needed.** Earlier revisions of this file instructed you to run
 `UPDATE ticker_news_embeddings SET embedding = embedding::vector`. That is a
-no-op: pgvector registers an *assignment* cast from `double precision[]` to
-`vector`, so the notebook's `INSERT ... %s::double precision[]` into a
-`VECTOR(384)` column already stores a genuine vector. Verified on PostgreSQL
-17.10 / pgvector 0.8.0.
+no-op. `embeddings_pipeline.py` inserts pgvector's native literal with an
+explicit `%s::vector` cast, so rows land as genuine vectors. (Even the older
+`%s::double precision[]` form worked, because pgvector registers an *assignment*
+cast from `double precision[]` to `vector`.) Verified on PostgreSQL 17.10 /
+pgvector 0.8.0.
 
 ## Why Manual Setup?
 

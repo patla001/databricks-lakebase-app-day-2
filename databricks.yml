@@ -1,7 +1,7 @@
 # Databricks Asset Bundle config for this project.
 # Deploy with: databricks bundle deploy -t dev   (or -t prod)
 # This wires up the ticker-news embeddings notebook as a scheduled Workflow
-# (see resources/ingest_ticker_news_embeddings_job.yml).
+# (see resources/lakebase_embeddings_job.yml).
 
 bundle:
   name: databricks-lakebase-app-day-2

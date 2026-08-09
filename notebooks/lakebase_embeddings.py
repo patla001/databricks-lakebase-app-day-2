@@ -67,10 +67,20 @@ print(f"{EMBEDDING_MODEL} -> {EMBEDDING_DIM}-dim vectors")
 import os
 import sys
 
-# In a Databricks Git folder the notebook's own directory is the cwd; the shared
-# modules (embeddings_pipeline, lakebase, massive_client) sit one level up.
-for candidate in (os.getcwd(), os.path.dirname(os.getcwd())):
-    if candidate not in sys.path:
+# The shared modules (embeddings_pipeline, lakebase, massive_client) live at the
+# repo root, one level above this notebook. In a Git folder the cwd is the
+# notebook's directory, but that is not guaranteed for a bundle-deployed job
+# task, so also derive the location from the notebook's own workspace path.
+candidates = [os.getcwd(), os.path.dirname(os.getcwd())]
+try:
+    ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+    nb_dir = os.path.dirname("/Workspace" + ctx.notebookPath().get())
+    candidates += [nb_dir, os.path.dirname(nb_dir)]
+except Exception:
+    pass  # not fatal - the cwd candidates usually suffice
+
+for candidate in candidates:
+    if candidate and candidate not in sys.path and os.path.isdir(candidate):
         sys.path.insert(0, candidate)
 
 try:

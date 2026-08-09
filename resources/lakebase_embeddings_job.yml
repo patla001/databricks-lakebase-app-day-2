@@ -1,0 +1,69 @@
+# Databricks Workflow that runs notebooks/lakebase_embeddings.py on a schedule.
+# The notebook reads tickers from the `watchlist` table, fetches news for them
+# from Massive (rate-limited), and writes title/description and article-chunk
+# embeddings into Lakebase via pgvector.
+#
+# Deploy: databricks bundle deploy -t dev
+# Run once manually: databricks bundle run lakebase_embeddings_job -t dev
+
+resources:
+  jobs:
+    lakebase_embeddings_job:
+      name: "[${bundle.target}] Lakebase Ticker News Embeddings"
+
+      # Daily at 6:00 AM UTC, after Massive's feeds have updated overnight.
+      schedule:
+        quartz_cron_expression: "0 0 6 * * ?"
+        timezone_id: "UTC"
+        pause_status: PAUSED  # flip to UNPAUSED once a manual run succeeds
+
+      email_notifications:
+        on_failure:
+          - ${workspace.current_user.userName}
+
+      max_concurrent_runs: 1
+
+      job_clusters:
+        - job_cluster_key: default_cluster
+          new_cluster:
+            # An ML runtime, because it ships torch and sentence-transformers.
+            # On a standard runtime the notebook's %pip cell still works, but it
+            # reinstalls ~2GB of torch on every run - slow and needless.
+            spark_version: "15.4.x-cpu-ml-scala2.12"
+            node_type_id: "i3.xlarge"
+
+            # Single node: the notebook is driver-side Python (psycopg2 +
+            # sentence-transformers) and never distributes work, so workers
+            # would sit idle and bill for nothing.
+            num_workers: 0
+            spark_conf:
+              spark.master: "local[*]"
+              spark.databricks.cluster.profile: "singleNode"
+            custom_tags:
+              ResourceClass: "SingleNode"
+
+            data_security_mode: SINGLE_USER
+
+      tasks:
+        - task_key: lakebase_embeddings
+          job_cluster_key: default_cluster
+
+          # Article-body fetching hits publisher sites one at a time; a large
+          # watchlist can push the run past an hour.
+          timeout_seconds: 7200
+
+          notebook_task:
+            notebook_path: ../notebooks/lakebase_embeddings.py
+            # Only the widgets the notebook actually declares. Table names and
+            # secret scope/key are not widgets - they come from the defaults in
+            # lakebase.py / massive_client.py, overridable by env vars.
+            base_parameters:
+              embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+              news_fetch_limit: "50"
+              max_requests_per_minute: "5"
+              chunk_size: "800"
+              chunk_overlap: "100"
+              skip_news_sync: "false"
+              # Set true if the cluster's network cannot reach publisher sites;
+              # title/description embeddings still run.
+              skip_chunks: "false"

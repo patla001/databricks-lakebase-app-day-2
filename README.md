@@ -14,8 +14,8 @@ A minimal Databricks App that:
 - `setup_secrets.py` - One-time script to create the secret scopes and store the Massive API key + Lakebase URL
 - `app.yaml` - Databricks App deployment config (command + env vars)
 - `templates/index.html` - Watchlist UI (add + remove tickers)
-- `notebooks/ingest_ticker_news_embeddings.py` - Self-contained ETL notebook: reads tickers from the `watchlist` table, fetches news for those tickers directly from Massive (rate-limited to 5 requests/min for the free API tier) into `ticker_news_documents`, computes title/description embeddings into `ticker_news_embeddings`, and fetches + chunks + embeds each article's full body (via `trafilatura`) into `ticker_news_chunk_embeddings` (pgvector)
-- `databricks.yml` + `resources/ingest_ticker_news_embeddings_job.yml` - Databricks Asset Bundle config that schedules the notebook above as a Workflow (see [Scheduling the embeddings notebook](#scheduling-the-embeddings-notebook-as-a-databricks-workflow))
+- `notebooks/lakebase_embeddings.py` - Self-contained ETL notebook: reads tickers from the `watchlist` table, fetches news for those tickers directly from Massive (rate-limited to 5 requests/min for the free API tier) into `ticker_news_documents`, computes title/description embeddings into `ticker_news_embeddings`, and fetches + chunks + embeds each article's full body (via `trafilatura`) into `ticker_news_chunk_embeddings` (pgvector)
+- `databricks.yml` + `resources/lakebase_embeddings_job.yml` - Databricks Asset Bundle config that schedules the notebook above as a Workflow (see [Scheduling the embeddings notebook](#scheduling-the-embeddings-notebook-as-a-databricks-workflow))
 - `.env.example` - Local dev env var template (copy to `.env`, do not commit real values)
 
 ## Step-by-step setup
@@ -192,53 +192,64 @@ All of this is done through the Databricks workspace UI:
 
 ## Scheduling the embeddings notebook as a Databricks Workflow
 
-`notebooks/ingest_ticker_news_embeddings.py` is a self-contained ETL: it reads the distinct
-tickers from the `watchlist` table, fetches news for those tickers directly from Massive
-(serially, rate-limited to `max_requests_per_minute` - 5/min by default, matching the free
-Massive API tier's strict limits), and upserts them into `ticker_news_documents`. It then turns
-those rows into vector embeddings in `ticker_news_embeddings` (title + description) and
-`ticker_news_chunk_embeddings` (chunks of the full article body, fetched from each article's
-`article_url` and extracted with `trafilatura`). You can run it on a schedule two ways — pick
-whichever fits your setup:
+`notebooks/lakebase_embeddings.py` reads the distinct tickers from the `watchlist`
+table, fetches news for those tickers from Massive (serially, rate-limited to
+`max_requests_per_minute` - 5/min by default, matching the free Massive API tier's
+strict limits), and upserts them into `ticker_news_documents`. It then turns those
+rows into vector embeddings in `ticker_news_embeddings` (title + description) and
+`ticker_news_chunk_embeddings` (chunks of the full article body, fetched from each
+article's `article_url` and extracted with `trafilatura`).
+
+The notebook is a thin driver: the stages live in `embeddings_pipeline.py` at the
+repo root, so they can be tested outside Databricks. **It must run from a Git
+folder containing the whole repo** — importing the notebook file on its own will
+fail, since it needs `embeddings_pipeline`, `lakebase` and `massive_client`
+alongside it.
+
+You can run it on a schedule two ways — pick whichever fits your setup:
 
 ### Option A: Databricks Asset Bundle (CLI, version-controlled)
 
 This repo already includes bundle config for this: `databricks.yml` +
-`resources/ingest_ticker_news_embeddings_job.yml`. This is the recommended path if you want the
+`resources/lakebase_embeddings_job.yml`. This is the recommended path if you want the
 job definition tracked in git alongside the code.
 
 1. Set the real workspace URL in `databricks.yml` (replace `<your-workspace-instance>`).
 2. Deploy: `databricks bundle deploy -t dev`
-3. Test it once manually: `databricks bundle run ingest_ticker_news_embeddings_job -t dev`
+3. Test it once manually: `databricks bundle run lakebase_embeddings_job -t dev`
 4. Once you've confirmed a successful run, flip `pause_status: PAUSED` to `pause_status: UNPAUSED`
-   in `resources/ingest_ticker_news_embeddings_job.yml` and redeploy to turn on the daily schedule.
+   in `resources/lakebase_embeddings_job.yml` and redeploy to turn on the daily schedule.
 
 ### Option B: Workflows UI (no CLI required)
 
 If you'd rather not use the CLI, you can create the equivalent job by hand in the Databricks UI:
 
 1. **Get the notebook into your workspace**: if you already created a Git folder for this repo
-   (see step 7 above), the notebook is already there at `notebooks/ingest_ticker_news_embeddings.py`.
+   (see step 7 above), the notebook is already there at `notebooks/lakebase_embeddings.py`.
    Otherwise, upload/import it via **Workspace** > **Create** > **Notebook** > **Import**.
 2. **Create the job**: go to **Workflows** (left sidebar) > **Jobs** > **Create Job**.
 3. **Add a task**:
    - Task type: **Notebook**.
-   - Notebook path: browse to `notebooks/ingest_ticker_news_embeddings.py` in your Git folder.
-   - Cluster: choose **New job cluster** (a small general-purpose cluster is enough) or an existing
-     cluster/serverless, if available.
-   - Under **Parameters**, add the same widget values the notebook expects:
-     - `watchlist_table_name` = `watchlist`
-     - `news_table_name` = `ticker_news_documents`
-     - `embeddings_table_name` = `ticker_news_embeddings`
-     - `chunk_embeddings_table_name` = `ticker_news_chunk_embeddings`
-     - `embedding_model` = `sentence-transformers/all-MiniLM-L6-v2`
-     - `massive_secret_scope` = `massive`
-     - `massive_secret_key` = `api-key`
-     - `massive_api_base_url` = `https://api.massive.com`
-     - `news_fetch_limit` = `50`
-     - `max_requests_per_minute` = `5`
-     - `chunk_size` = `800`
-     - `chunk_overlap` = `100`
+   - Notebook path: browse to `notebooks/lakebase_embeddings.py` in your Git folder.
+   - Cluster: choose **New job cluster** and pick a **Databricks Runtime for Machine
+     Learning** version. It ships `torch` and `sentence-transformers`; on a standard
+     runtime the notebook's `%pip` cell reinstalls ~2GB of torch on every run.
+     A **single node** is right — the notebook is driver-side Python and never
+     distributes work, so workers only add cost.
+   - **Parameters are optional.** Every widget defaults to the correct value.
+     Override only what you want to change:
+
+     | parameter | default |
+     |---|---|
+     | `embedding_model` | `sentence-transformers/all-MiniLM-L6-v2` |
+     | `news_fetch_limit` | `50` |
+     | `max_requests_per_minute` | `5` |
+     | `chunk_size` / `chunk_overlap` | `800` / `100` |
+     | `skip_news_sync` | `false` |
+     | `skip_chunks` | `false` — set `true` if the cluster can't reach publisher sites |
+
+     Table names and the secret scope/key are **not** widgets: they come from the
+     defaults in `lakebase.py` and `massive_client.py`, overridable via env vars.
 4. **Add a schedule**: click **Add trigger** on the job, choose **Scheduled**, and set it to run
    daily (e.g. 6:00 AM UTC) using either the simple picker or a cron expression
    (`0 0 6 * * ?`, timezone UTC).

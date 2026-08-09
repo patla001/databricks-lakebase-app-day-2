@@ -86,8 +86,8 @@ def ensure_watchlist_table():
 def ensure_news_table():
     """
     Create the raw ticker-news documents table in Lakebase if it doesn't
-    exist yet. This is the RAW document store the Spark notebook
-    (notebooks/ingest_ticker_news_embeddings.py) reads from to compute
+    exist yet. This is the RAW document store the embeddings notebook
+    (notebooks/lakebase_embeddings.py) reads from to compute
     vector embeddings into a separate `<NEWS_TABLE_NAME>_embeddings` table.
     """
     lakebase.run_write(
