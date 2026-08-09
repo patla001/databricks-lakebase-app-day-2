@@ -33,6 +33,36 @@ SELECT has_schema_privilege('massive_app', 'public', 'CREATE');
 All the other files here are plain Postgres DDL and carry the same constraint:
 they must reach the Lakebase database, not Unity Catalog.
 
+### Run 01–03 as the app role, not as your own identity
+
+The tables end up owned by whichever role creates them — normally `massive_app`,
+since `app.py`'s `ensure_*_table()` helpers get there first. Re-running these
+scripts from the Lakebase SQL Editor as your Databricks identity then fails:
+
+```
+ERROR: must be owner of table ticker_news_documents (SQLSTATE 42501)
+```
+
+That comes from the `CREATE INDEX IF NOT EXISTS` line. Postgres checks table
+ownership *before* the `IF NOT EXISTS` short-circuit, so the statement is
+rejected even when the index already exists. (The `CREATE TABLE IF NOT EXISTS`
+above it does short-circuit first, which is why only part of the script errors.)
+
+Note that `databricks_superuser` does **not** solve this — despite the name it
+is not a Postgres superuser (`rolsuper = false`). It bundles `pg_read_all_data`,
+`pg_write_all_data`, `pg_maintain` and `pg_monitor`, which allow reading and
+writing every table but not owning or indexing one.
+
+Options:
+
+* **Nothing** — if the tables and indexes already exist, the error is cosmetic.
+  Verify with `04_verify_embeddings.sql`.
+* **Run as `massive_app`**, via psycopg2 in a notebook Python cell using the
+  `database/lakebase-url` secret (the snippet in `00_grant_app_role.sql` shows
+  the connection).
+* **Take ownership**, as a role that can (`cloud_admin`):
+  `ALTER TABLE ticker_news_documents OWNER TO "your-identity";`
+
 ### 1. `01_setup_news_table.sql`
 Creates `ticker_news_documents`, the raw news article store, plus a ticker index.
 (`app.py`'s `ensure_news_table()` creates the same table on demand, so this is
