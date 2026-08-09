@@ -473,7 +473,17 @@ def _upsert_news_batch(ticker: str, articles: list[dict]) -> int:
 
 if __name__ == '__main__':
     host = os.getenv('FLASK_RUN_HOST', '0.0.0.0')
-    port = int(os.getenv('FLASK_RUN_PORT', 8000))
+
+    # Databricks Apps assigns the port and injects it as DATABRICKS_APP_PORT;
+    # the platform health-checks that exact port, so binding anywhere else
+    # leaves the app permanently "starting" and unreachable. It must win over
+    # the local-dev default.
+    port = int(
+        os.getenv('DATABRICKS_APP_PORT')
+        or os.getenv('FLASK_RUN_PORT')
+        or 8000
+    )
+
     # Debug (with the interactive reloader) is on by default for local runs;
     # app.yaml sets FLASK_DEBUG=0 so the deployed app doesn't expose it.
     debug = os.getenv('FLASK_DEBUG', '1') == '1'

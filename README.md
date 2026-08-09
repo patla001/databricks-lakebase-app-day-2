@@ -180,7 +180,48 @@ All of this is done through the Databricks workspace UI:
    - Click **Deploy** (or **Create and deploy**) in the Apps UI. Databricks will build and start the app using the Git folder's current contents — no `databricks` CLI commands are needed.
    - Whenever you update the code, pull the latest changes into the Git folder (**Git folder** > **Pull**, via the UI) and click **Deploy** again in the Apps UI to redeploy.
 
-5. Once deployed, open the app's URL from the Apps UI and hit `GET /healthz` to confirm it's running, then try `POST /sync` to pull data from Massive into Lakebase.
+5. **Find your app's URL.** Apps do **not** appear under Workspace, and not under
+   your Lakebase instance either - they are their own resource. Go to
+   **Compute > Apps** and click the app; the URL is on its detail page and looks
+   like:
+
+   ```
+   https://<app-name>-<number>.<region>.databricksapps.com
+   ```
+
+   That is the production equivalent of `http://localhost:8000`. Everything the
+   app serves locally is served there on the same paths - `/healthz`,
+   `/watchlist`, `/search`, and the UI at `/`.
+
+   The app is access-controlled: you must be signed in to the workspace and have
+   permission on the app. Opening the URL in a private window will show a login
+   page, not your app.
+
+### Deployment gotchas
+
+- **Grant the app's service principal READ on both secret scopes.** The app runs
+  as its own service principal, not as you. `app.yaml` only passes scope and key
+  *names*; the principal resolves the values at runtime, and without the grant
+  every request fails with a permissions error. Find the principal on the app's
+  detail page, then:
+
+  ```bash
+  databricks secrets put-acl database <app-service-principal-id> READ
+  databricks secrets put-acl massive   <app-service-principal-id> READ
+  ```
+
+- **Port.** Databricks Apps assigns a port and injects it as `DATABRICKS_APP_PORT`;
+  `app.py` reads that first and only falls back to `FLASK_RUN_PORT`/8000 locally.
+  Binding to the wrong port leaves the app stuck "starting" - the platform health
+  check never passes.
+
+- **First `/search` is slow.** The embedding model (~50MB) downloads on first use
+  into `FASTEMBED_CACHE_PATH` (`/tmp/.cache/fastembed`). `/tmp` does not survive a
+  restart, so the first search after each deploy pays that cost again.
+
+- **A Git folder is not required.** Apps deploy from any workspace path. If the
+  Git folder is broken, `databricks sync . /Workspace/Users/<you>/<dir>` gets the
+  code there without git.
 
 ## Endpoints
 
