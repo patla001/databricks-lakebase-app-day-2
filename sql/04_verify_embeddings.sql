@@ -1,5 +1,16 @@
 -- Post-notebook verification.
 --
+-- ============================================================================
+-- RUN THIS IN THE LAKEBASE SQL EDITOR (opened from the database instance page).
+--
+-- Not in a workspace SQL editor or a notebook `%sql` cell - those target Unity
+-- Catalog, which has no knowledge of these Postgres tables and fails with:
+--     [TABLE_OR_VIEW_NOT_FOUND] The table or view `ticker_news_documents`
+--     cannot be found. Search path: [`system`.`session`, ..., `workspace`.`default`]
+-- The pgvector bits (vector_dims, the <=> operator) don't exist in Spark SQL
+-- either, so there is no version of this query that works against Unity Catalog.
+-- ============================================================================
+--
 -- NOTE: no cast step is required. Earlier docs said to run
 --     UPDATE ticker_news_embeddings SET embedding = embedding::vector ...
 -- That is a no-op. pgvector registers an ASSIGNMENT cast from

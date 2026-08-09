@@ -1,3 +1,6 @@
+-- RUN IN THE LAKEBASE SQL EDITOR (from the database instance page) - NOT in a
+-- workspace SQL editor or `%sql` cell, which target Unity Catalog and cannot
+-- see these Postgres tables.
 -- Setup script for ticker_news_chunk_embeddings table
 -- Run this manually in your Lakebase Postgres database before running the notebook
 
