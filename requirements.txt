@@ -5,3 +5,7 @@ sqlalchemy>=2.0.30
 flask>=3.0.3
 requests>=2.32.3
 python-dotenv>=1.0.1
+# Semantic search: runs all-MiniLM-L6-v2 via ONNX on CPU. Chosen over
+# sentence-transformers (~2.5GB of torch) because query vectors only need to
+# match the stored ones - measured agreement is cosine 0.99+.
+fastembed>=0.4.0

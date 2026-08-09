@@ -8,13 +8,15 @@ A minimal Databricks App that:
 
 ## Files
 
-- `app.py` - Flask app: `/healthz`, `/records` (GET), `/sync` (POST), `/watchlist` (GET/POST/DELETE), `/news/sync` (POST)
+- `app.py` - Flask app: `/healthz`, `/records` (GET), `/sync` (POST), `/watchlist` (GET/POST/DELETE), `/news/sync` (POST), `/search` (GET)
 - `lakebase.py` - Lakebase connection helper (single `LAKEBASE_URL`, psycopg2 + SQLAlchemy)
 - `massive_client.py` - Massive API client: pagination generator for large datasets, `get_latest_price`, `get_news`
+- `embeddings_pipeline.py` - Embedding stages (news sync, embed, chunk) as plain functions, so they can be tested outside Databricks
+- `search.py` - Semantic search over the stored vectors, used by `/search`
 - `setup_secrets.py` - One-time script to create the secret scopes and store the Massive API key + Lakebase URL
 - `app.yaml` - Databricks App deployment config (command + env vars)
 - `templates/index.html` - Watchlist UI (add + remove tickers)
-- `notebooks/lakebase_embeddings.py` - Self-contained ETL notebook: reads tickers from the `watchlist` table, fetches news for those tickers directly from Massive (rate-limited to 5 requests/min for the free API tier) into `ticker_news_documents`, computes title/description embeddings into `ticker_news_embeddings`, and fetches + chunks + embeds each article's full body (via `trafilatura`) into `ticker_news_chunk_embeddings` (pgvector)
+- `notebooks/lakebase_embeddings.py` - ETL notebook (a thin driver over `embeddings_pipeline.py`): reads tickers from the `watchlist` table, fetches news for those tickers directly from Massive (rate-limited to 5 requests/min for the free API tier) into `ticker_news_documents`, computes title/description embeddings into `ticker_news_embeddings`, and fetches + chunks + embeds each article's full body (via `trafilatura`) into `ticker_news_chunk_embeddings` (pgvector)
 - `databricks.yml` + `resources/lakebase_embeddings_job.yml` - Databricks Asset Bundle config that schedules the notebook above as a Workflow (see [Scheduling the embeddings notebook](#scheduling-the-embeddings-notebook-as-a-databricks-workflow))
 - `.env.example` - Local dev env var template (copy to `.env`, do not commit real values)
 
@@ -189,6 +191,34 @@ All of this is done through the Databricks workspace UI:
 - `POST /watchlist` - add/update a symbol on the current user's watchlist
 - `DELETE /watchlist/<symbol>` - remove a symbol from the current user's watchlist
 - `POST /news/sync` with optional JSON body `{"tickers": ["AAPL", "MSFT"], "limit": 50}` - pull recent news per ticker from Massive and upsert into `ticker_news_documents`
+- `GET /search?q=...` - semantic search over the embedded news corpus
+
+### `GET /search`
+
+| param | default | notes |
+|---|---|---|
+| `q` | *(required)* | free-text query |
+| `mode` | `articles` | `articles` ranks whole stories by title+description; `chunks` ranks passages from article bodies |
+| `limit` | `10` | capped at 50 |
+| `ticker` | *(all)* | restrict to one symbol, e.g. `MSFT` |
+
+```bash
+curl "localhost:8000/search?q=AI+datacenter+capital+spending&limit=4"
+curl "localhost:8000/search?q=iPhone+sales+in+China&mode=chunks&limit=3"
+```
+
+Use `mode=chunks` when feeding context to an LLM - it returns the specific
+passage that matched, not just the headline.
+
+Query vectors have to come from the same model that produced the stored ones
+(`all-MiniLM-L6-v2`, 384 dims), or the cosine distances are meaningless. The app
+runs that model through `fastembed` (ONNX, CPU) rather than
+`sentence-transformers`, which would drag in ~2.5GB of torch. The two agree to
+cosine 0.99+ on identical input, so rankings match while the app stays small.
+The model downloads on first search (~50MB, cached in `FASTEMBED_CACHE_PATH`,
+default `/tmp/.cache/fastembed`), so expect the first query to be slow.
+
+Returns an empty `results` list if the embeddings notebook has not run yet.
 
 ## Scheduling the embeddings notebook as a Databricks Workflow
 

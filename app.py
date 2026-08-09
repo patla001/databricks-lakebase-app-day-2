@@ -222,6 +222,53 @@ def sync_news_from_massive():
     return jsonify({"synced": total, "tickers": tickers})
 
 
+@app.route("/search")
+def search_news():
+    """
+    Semantic search over the embedded news corpus.
+
+        GET /search?q=microsoft ai spending&limit=5&mode=chunks&ticker=MSFT
+
+    mode=articles (default) ranks whole articles by their title+description
+    vector; mode=chunks ranks passages from article bodies, which is what you
+    want when feeding context to an LLM.
+
+    Requires the embeddings notebook to have run - an empty corpus returns an
+    empty list rather than an error.
+    """
+    query = (request.args.get("q") or "").strip()
+    if not query:
+        return jsonify({"error": "Missing required query parameter: q"}), 400
+
+    mode = request.args.get("mode", "articles").lower()
+    if mode not in ("articles", "chunks"):
+        return jsonify({"error": f"mode must be 'articles' or 'chunks', got {mode!r}"}), 400
+
+    try:
+        limit = int(request.args.get("limit", 10))
+    except ValueError:
+        return jsonify({"error": "limit must be an integer"}), 400
+    # Cap the limit so a stray ?limit=100000 can't pull the whole corpus.
+    limit = max(1, min(limit, 50))
+
+    ticker = (request.args.get("ticker") or "").strip().upper() or None
+    if ticker and not _TICKER_RE.match(ticker):
+        return jsonify({"error": f"Invalid ticker symbol: {ticker!r}"}), 400
+
+    import search  # imported lazily: pulls in the ONNX runtime on first search
+
+    finder = search.search_chunks if mode == "chunks" else search.search_articles
+    results = finder(query, limit=limit, ticker=ticker)
+
+    return jsonify({
+        "query": query,
+        "mode": mode,
+        "ticker": ticker,
+        "count": len(results),
+        "results": results,
+    })
+
+
 @app.route("/watchlist", methods=["GET"])
 def get_watchlist():
     """Return the current user's watchlist symbols, with their last known price."""
