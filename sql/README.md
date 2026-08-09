@@ -8,11 +8,30 @@ Run these against your Lakebase Postgres database before running the
 ### 0. `00_grant_app_role.sql`
 Grants the app's Postgres role (`massive_app`) `CREATE` on schema `public`.
 
-Must be run by a role with superuser rights — your own Databricks identity, which
-belongs to `databricks_superuser`. The app role cannot grant this to itself.
 Required because PostgreSQL 15+ no longer grants `CREATE` on `public` to every
 role; without it, every `ensure_*_table()` call in `app.py` fails with
-`permission denied for schema public`.
+`permission denied for schema public`. Must be run by a role with superuser
+rights — your own Databricks identity belongs to `databricks_superuser`. The app
+role cannot grant this to itself.
+
+**Skip it** if the role is already a member of `databricks_superuser`, which
+confers `CREATE` on its own. Check with:
+
+```sql
+SELECT has_schema_privilege('massive_app', 'public', 'CREATE');
+```
+
+> ⚠️ **Do not run this in a notebook `%sql` cell.** Those execute against Unity
+> Catalog, which reads `massive_app` as a Databricks principal instead of a
+> Postgres role and fails with
+> `ErrorClass=PRINCIPAL_DOES_NOT_EXIST ... Could not find principal with name massive_app`.
+> The syntax is valid in both dialects, so Unity Catalog accepts it and only
+> then fails to resolve the name. Run it against Lakebase Postgres instead —
+> via the instance's own query editor, `psql`, or psycopg2 in a Python cell.
+> See the header comment in the file for all three.
+
+All the other files here are plain Postgres DDL and carry the same constraint:
+they must reach the Lakebase database, not Unity Catalog.
 
 ### 1. `01_setup_news_table.sql`
 Creates `ticker_news_documents`, the raw news article store, plus a ticker index.

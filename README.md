@@ -93,13 +93,19 @@ confirm it worked. To skip the prompts entirely, pre-set `LAKEBASE_URL` and
 
 ### 3b. Grant the role permission to create tables
 
-Run `sql/00_grant_app_role.sql` once against your Lakebase instance, as your own
-Databricks identity (it belongs to `databricks_superuser`) — use the Databricks
-SQL editor connected to the instance:
+Run `sql/00_grant_app_role.sql` once **against the Lakebase Postgres database**,
+as your own Databricks identity (it belongs to `databricks_superuser`):
 
 ```sql
 GRANT CREATE ON SCHEMA public TO massive_app;
 ```
+
+> ⚠️ Not in a notebook `%sql` cell — that targets Unity Catalog and fails with
+> `PRINCIPAL_DOES_NOT_EXIST`, because `massive_app` is a Postgres role, not a
+> Databricks principal. Use the Lakebase instance's query editor, `psql`, or
+> psycopg2 from a Python cell; the file's header comment shows all three.
+>
+> Skip this entirely if the role is already a member of `databricks_superuser`.
 
 Skip this and the app starts fine but every database call fails with
 `permission denied for schema public`. As of PostgreSQL 15 the `public` schema
