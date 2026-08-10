@@ -6,6 +6,7 @@
 env.dms
 .env.dms
 !.env.example
+sql/Lakebase-Verification-Queries.py
 
 __pycache__/
 *.pyc
