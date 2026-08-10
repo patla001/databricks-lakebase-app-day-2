@@ -1,10 +1,164 @@
-# Massive + Lakebase Databricks App Boilerplate
+# Massive → Lakebase: semantic search over stock news
 
-A minimal Databricks App that:
-- Connects to **Lakebase** (Databricks-managed Postgres) using a single `LAKEBASE_URL` secret (a native Postgres role with a static password)
-- Calls the **Massive API** (large paginated dataset) using a key stored in a Databricks secret scope
-- Syncs Massive API data into Lakebase in batches
-- Exposes a small Flask API to trigger syncs and read synced records
+A Databricks App that pulls stock-news articles from the **Massive API** into
+**Lakebase** (Databricks-managed Postgres), embeds them with a sentence-transformer
+model, and serves cosine-similarity search over the corpus with **pgvector** — one
+Postgres instance doing both the relational and the vector work, no separate vector
+database.
+
+A scheduled Databricks Workflow keeps the corpus fresh; a Flask app serves a
+watchlist UI and a `/search` API on top of it.
+
+## Results
+
+Live figures from the deployed instance (PostgreSQL 17.10, pgvector 0.8.0):
+
+| Measure | Value |
+|---|---|
+| Articles ingested | **86** (AAPL 47, MSFT 39) |
+| Article embeddings | **86** — every document embedded, 0 unembedded |
+| Body-chunk embeddings | **501** — avg 5.9 per article, range 1–29 |
+| Vector column type | `vector`, **384 dims**, `all-MiniLM-L6-v2` |
+| Index | HNSW, `vector_cosine_ops`, on both embedding tables |
+| Referential integrity | 0 orphan chunks |
+
+### Search quality
+
+Real responses from `GET /search`, cosine similarity in `[0, 1]`:
+
+```bash
+curl "localhost:8000/search?q=AI+datacenter+capital+spending&limit=3"
+```
+```
+0.6060  MSFT  Microsoft Just Proved that AI Spending Can Pay Off. Here's How
+0.5930  MSFT  AI Inference Infrastructure Market Size to Surpass $229.95 Billion
+0.5808  MSFT  Alphabet, Microsoft, Amazon, and Oracle Just Gained $1.9 Trillion
+```
+
+`mode=chunks` returns the specific passage that matched, which is what a RAG
+prompt wants to quote rather than a headline:
+
+```bash
+curl "localhost:8000/search?q=iPhone+sales+in+China&mode=chunks&limit=2"
+```
+```
+0.5657  AAPL  #0  Is Apple Stock a Buy on the Dip as iPhone Sales Surge?
+        "Apple (AAPL +0.29%) continued its streak of strong iPhone sales during
+         its fiscal third quarter, but the stock fell as service revenue and
+         China sales…"
+```
+
+A nonsense query as a negative control — the scores collapse, which is the
+evidence that the ranked results above are signal and not an artifact of every
+vector being near every other one:
+
+```bash
+curl "localhost:8000/search?q=purple+bicycle+tuba+recipe&limit=2"
+```
+```
+0.0583  AAPL  If a Stock Market Crash Is Coming, I'm Loading Up on This ETF
+0.0515  MSFT  2 Energy Stocks With More Hype Than Fundamentals Right Now
+```
+
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph ingest["Ingest — scheduled Databricks Workflow"]
+        direction LR
+        WL["watchlist table<br/>(which tickers to track)"]
+        MA["Massive API<br/>/v2/reference/news"]
+        NB["notebooks/lakebase_embeddings<br/>thin driver"]
+        DOC["ticker_news_documents<br/>86 raw articles"]
+        EMB["embeddings_pipeline.py<br/>all-MiniLM-L6-v2, 384-dim"]
+        AV["ticker_news_embeddings<br/>86 vectors · title + description"]
+        CV["ticker_news_chunk_embeddings<br/>501 vectors · body passages"]
+
+        WL --> NB
+        MA --> NB
+        NB --> DOC
+        DOC --> EMB
+        EMB --> AV
+        EMB --> CV
+    end
+
+    subgraph serve["Serve — Flask on Databricks Apps"]
+        direction LR
+        REQ["GET /search?q=..."]
+        FE["search.py<br/>fastembed ONNX, CPU"]
+        PG["pgvector nearest-neighbour<br/>HNSW · cosine distance"]
+        OUT["ranked articles or passages"]
+        UI["templates/index.html<br/>watchlist UI"]
+        PRICE["Massive /v2/aggs/prev<br/>latest price"]
+
+        REQ --> FE --> PG --> OUT
+        UI --> PRICE
+    end
+
+    AV -.-> PG
+    CV -.-> PG
+    PRICE -.-> WL
+```
+
+The dotted edges cross a process boundary, not a storage one: `watchlist`, the raw
+documents and both vector tables all live in the **same** Lakebase Postgres
+database. The ingest side writes it on a schedule, the serving side reads it per
+request.
+
+## Engineering decisions
+
+**fastembed (ONNX) instead of sentence-transformers for query embedding.**
+The serving path only needs to place a query in the same vector space as the
+stored embeddings, not to train anything. `sentence-transformers` would pull
+~2.5GB of torch into the app image for that. `fastembed` runs the same
+`all-MiniLM-L6-v2` weights as an ONNX graph on CPU. Measured against vectors this
+project's own pipeline wrote, the two agree to **cosine 0.99+**, so rankings are
+unchanged while the app stays small enough to cold-start quickly. The notebook,
+which runs on an ML cluster where torch is already present, still uses
+`sentence-transformers`.
+
+**The HNSW index exists but the planner ignores it — and that's correct.**
+At 501 rows a sequential scan beats an index probe, so `EXPLAIN` shows `Seq Scan`.
+The index is there for when the corpus grows. Worth stating plainly rather than
+claiming an index-accelerated search that isn't happening yet.
+
+**`databricks_superuser` is not a Postgres superuser.** It has
+`rolsuper = false`; it bundles `pg_read_all_data`, `pg_write_all_data`,
+`pg_maintain` and `pg_monitor`. That is enough to read and write every table but
+not to *own* one — so `CREATE INDEX IF NOT EXISTS` still fails with
+`must be owner of table` (Postgres checks ownership before the `IF NOT EXISTS`
+short-circuit). Combined with PostgreSQL 15 dropping the implicit `CREATE` grant
+on schema `public`, this is the source of most first-run setup failures here; see
+[`sql/README.md`](sql/README.md).
+
+**Stable chunk IDs.** `chunk_id()` in `embeddings_pipeline.py` is
+`sha256(f"{article_id}:{index}")[:32]` — derived from position, not content, and
+deliberately not a random UUID. Re-running the pipeline over unchanged articles
+therefore collides on the primary key and `ON CONFLICT (id) DO NOTHING` absorbs
+it, instead of duplicating 501 rows every night.
+
+**Credentials are never in the repo or the image.** The deployed app receives
+`LAKEBASE_URL` and `MASSIVE_API_KEY` as environment variables injected by
+Databricks from *app resources* (`valueFrom` in `app.yaml`), with an SDK
+secret-scope read as fallback. Locally the same variables come from a gitignored
+`.env`. The error handler in `app.py` deliberately does not echo exception text,
+because a psycopg2 connection failure puts the whole DSN — password included —
+into `str(err)`.
+
+## Screenshots
+
+<!-- Drop watchlist.png and search.png into docs/img/ (see docs/img/README.md for
+     what to capture), then delete this comment's opening and closing markers to
+     make the table below visible. Left commented out so the front page doesn't
+     show two broken-image icons in the meantime.
+
+| Watchlist UI | Semantic search |
+|---|---|
+| ![Watchlist UI](docs/img/watchlist.png) | ![Semantic search results](docs/img/search.png) |
+
+-->
+
+Not captured yet — see [`docs/img/README.md`](docs/img/README.md).
 
 ## Files
 
@@ -14,7 +168,7 @@ A minimal Databricks App that:
 - `embeddings_pipeline.py` - Embedding stages (news sync, embed, chunk) as plain functions, so they can be tested outside Databricks
 - `search.py` - Semantic search over the stored vectors, used by `/search`
 - `setup_secrets.py` - One-time script to create the secret scopes and store the Massive API key + Lakebase URL
-- `app.yaml` - Databricks App deployment config (command + env vars)
+- `app.yaml` - Databricks App deployment config: the start command, plus `env` entries that map secret **app resources** to `LAKEBASE_URL` / `MASSIVE_API_KEY` via `valueFrom`
 - `templates/index.html` - Watchlist UI (add + remove tickers)
 - `notebooks/lakebase_embeddings.py` - ETL notebook (a thin driver over `embeddings_pipeline.py`): reads tickers from the `watchlist` table, fetches news for those tickers directly from Massive (rate-limited to 5 requests/min for the free API tier) into `ticker_news_documents`, computes title/description embeddings into `ticker_news_embeddings`, and fetches + chunks + embeds each article's full body (via `trafilatura`) into `ticker_news_chunk_embeddings` (pgvector)
 - `databricks.yml` + `resources/lakebase_embeddings_job.yml` - Databricks Asset Bundle config that schedules the notebook above as a Workflow (see [Scheduling the embeddings notebook](#scheduling-the-embeddings-notebook-as-a-databricks-workflow))
@@ -49,8 +203,17 @@ A minimal Databricks App that:
 6. **Copy the connection URL** shown for the role. It will look like:
 
    ```
-   postgresql://<role>:<password>@<host>.database.cloud.databricks.com:5432/databricks_postgres?sslmode=require
+   postgresql://<role>:<password>@<your-lakebase-host>:5432/databricks_postgres?sslmode=require
    ```
+
+   > ⚠️ **Paste the host whole; do not append a domain to it.** The host Databricks
+   > shows you already includes its own — Lakebase is Neon-backed, so it typically
+   > ends in `.cloud.databricks.com` or `.neon.tech` depending on your instance.
+   > Pasting it into a template that already ends in `.database.cloud.databricks.com`
+   > produces a doubled hostname that fails DNS resolution, and the resulting
+   > psycopg2 error says `password authentication failed` — which sends you
+   > rotating a password that was never wrong. Confirm with
+   > `nslookup <your-lakebase-host>` before going further.
 
    Keep this URL — you'll paste it into `setup_secrets.py`'s prompt in the next step.
 
@@ -126,10 +289,17 @@ overrides**: when they're set, the app connects directly and never contacts
 Databricks — which means you can run locally without any Databricks auth at all.
 Leave them unset and the app falls back to reading the secret scopes.
 
-On Databricks Apps there is no `.env`. `app.yaml` passes the scope and key *names*
-(`LAKEBASE_SECRET_SCOPE` / `LAKEBASE_SECRET_KEY`, etc.) and the app's service
-principal reads the secret values at runtime via the SDK — so make sure that
-principal has READ on both scopes.
+On Databricks Apps there is no `.env`. The same two variables are supplied by the
+platform instead: `app.yaml` declares them with `valueFrom`, naming **app
+resources** that Databricks resolves to the decrypted secret values and injects
+into the app's environment. See [step 7.3](#7-create-a-git-folder-in-databricks-and-deploy-the-app-no-cli-required)
+for how to create those resources.
+
+Either way the application code is identical — `lakebase.py` and
+`massive_client.py` read `LAKEBASE_URL` / `MASSIVE_API_KEY` from the environment
+and don't care who put them there. Both log which source they used (never the
+value) at startup, so a misconfigured resource shows up in the app logs instead of
+silently falling through.
 
 ### 5. Install dependencies
 
@@ -174,7 +344,30 @@ All of this is done through the Databricks workspace UI:
 
 3. **Point the app at your Git folder**:
    - When prompted for the source code location, select **Workspace files** / **Git folder** and browse to the Git folder you created in step 1 (the folder containing `app.py` and `app.yaml`).
-   - Databricks will read `app.yaml` from that folder automatically to configure the `command` and `env` (the secret scope/key *names* plus `MASSIVE_API_BASE_URL`). The app's service principal resolves the actual secret values at runtime, so grant it READ on the `database` and `massive` scopes.
+   - Databricks reads `app.yaml` from that folder automatically to configure the `command` and `env`.
+
+   **Then add the two secret resources**, or the app will start but every request
+   will fail. On the app's page: **Edit** > **App resources** > **+ Add resource**
+   > **Secret**, twice:
+
+   | Resource key | Scope | Key | Permission |
+   |---|---|---|---|
+   | `lakebase-url` | `database` | `lakebase-url` | Can read |
+   | `massive-api-key` | `massive` | `api-key` | Can read |
+
+   The resource key is what `app.yaml` refers to:
+
+   ```yaml
+   - name: LAKEBASE_URL
+     valueFrom: lakebase-url
+   - name: MASSIVE_API_KEY
+     valueFrom: massive-api-key
+   ```
+
+   `valueFrom` resolves to the **decrypted secret value**, so nothing sensitive
+   is ever written to `app.yaml` or committed. Creating the resource also grants
+   the app's service principal read access on that secret — which is why there is
+   no separate `databricks secrets put-acl` step.
 
 4. **Deploy**:
    - Click **Deploy** (or **Create and deploy**) in the Apps UI. Databricks will build and start the app using the Git folder's current contents — no `databricks` CLI commands are needed.
@@ -193,22 +386,40 @@ All of this is done through the Databricks workspace UI:
    app serves locally is served there on the same paths - `/healthz`,
    `/watchlist`, `/search`, and the UI at `/`.
 
-   The app is access-controlled: you must be signed in to the workspace and have
-   permission on the app. Opening the URL in a private window will show a login
-   page, not your app.
+### The app URL is not public, and cannot be made public
+
+Databricks Apps are access-controlled: you must be signed in to the workspace and
+hold permission on the app. Opening the URL in a private window shows a login
+page. The two permission levels are `CAN USE` and `CAN MANAGE`, and the broadest
+sharing option — the `All account users` group — still means users in **your**
+Databricks account.
+
+There is no anonymous option. Per the Databricks documentation: *"You can't make
+Databricks apps public. Anonymous access and bypassing single sign-on (SSO) are
+not supported."* Someone who has a Databricks login through their own employer is
+in a different account and will be denied; letting them in would mean provisioning
+them as a user in your account.
+
+So this URL is not a demo link you can hand out. For that, deploy a read-only
+build elsewhere against a `SELECT`-only Postgres role — see the note at the end of
+this README.
 
 ### Deployment gotchas
 
-- **Grant the app's service principal READ on both secret scopes.** The app runs
-  as its own service principal, not as you. `app.yaml` only passes scope and key
-  *names*; the principal resolves the values at runtime, and without the grant
-  every request fails with a permissions error. Find the principal on the app's
-  detail page, then:
+- **Add the two secret resources** (step 7.3). Without them `LAKEBASE_URL` and
+  `MASSIVE_API_KEY` are unset, the app falls back to reading the secret scopes
+  through the SDK, and that path needs the service principal to hold READ on both
+  scopes:
 
   ```bash
   databricks secrets put-acl database <app-service-principal-id> READ
   databricks secrets put-acl massive   <app-service-principal-id> READ
   ```
+
+  The resource route is preferred: it needs no ACL management, and it avoids a
+  Databricks API round trip on the first credential read. Check the app logs for
+  `resolved from the LAKEBASE_URL environment variable` to confirm which path is
+  actually in use.
 
 - **Port.** Databricks Apps assigns a port and injects it as `DATABRICKS_APP_PORT`;
   `app.py` reads that first and only falls back to `FLASK_RUN_PORT`/8000 locally.
@@ -285,7 +496,10 @@ This repo already includes bundle config for this: `databricks.yml` +
 `resources/lakebase_embeddings_job.yml`. This is the recommended path if you want the
 job definition tracked in git alongside the code.
 
-1. Set the real workspace URL in `databricks.yml` (replace `<your-workspace-instance>`).
+1. Point the CLI at your workspace. `databricks.yml` deliberately does **not**
+   hardcode a host, so use standard Databricks auth — either
+   `export DATABRICKS_HOST=... DATABRICKS_TOKEN=...`, or a named profile with
+   `-p <profile>`. Confirm with `databricks bundle validate -t dev`.
 2. Deploy: `databricks bundle deploy -t dev`
 3. Test it once manually: `databricks bundle run lakebase_embeddings_job -t dev`
 4. Once you've confirmed a successful run, flip `pause_status: PAUSED` to `pause_status: UNPAUSED`
@@ -394,3 +608,29 @@ history.
 - The Massive API pagination in `massive_client.py` assumes a `{"items": [...], "next_cursor": ...}`
   cursor-based shape. Adjust `paginated_get` to match the real API's pagination contract.
 - For very large batch upserts, consider `psycopg2.extras.execute_values` instead of per-row inserts.
+
+## Running a publicly reachable demo
+
+Because a Databricks App can't be opened to anonymous visitors, a shareable live
+demo has to be deployed outside Databricks. Lakebase is an ordinary Postgres
+endpoint over TLS, so an external host can read from it directly — but not with
+this app's credentials. What that build needs:
+
+- **A dedicated `demo_readonly` Postgres role** with `SELECT` on the four tables
+  and nothing else. Notably *not* a member of `databricks_superuser`, which the
+  app's `massive_app` role currently is — that carries `pg_write_all_data` across
+  the entire database.
+- **Search-only routes.** Expose `GET /search`; drop `/sync`, `/news/sync`, and
+  the watchlist write and delete routes.
+- **No Massive API key deployed at all.** Search reads vectors that are already in
+  Postgres, so the public build never calls Massive — nothing to leak, and no risk
+  to the free tier's 5 requests/minute budget.
+- **Stop trusting `X-Forwarded-Email`.** `_current_user_email()` in `app.py` reads
+  that header to identify the user. Inside Databricks the platform sets it and
+  strips client-supplied copies; outside, nothing does, and it becomes a free
+  identity spoof.
+- **Rate limiting**, and the redacted error handler already in `app.py`.
+- A free host with ~1GB of RAM for the ONNX runtime and the 50MB model.
+
+Confirm too that the Lakebase instance has no IP access list that would reject the
+host's egress addresses.

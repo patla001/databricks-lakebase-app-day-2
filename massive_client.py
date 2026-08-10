@@ -1,18 +1,22 @@
 """
 Client for the Massive API.
 
-The API key is stored in a Databricks secret scope (see setup_secrets.py) and
-resolved at runtime via the Databricks SDK - it is never stored in code or
-app.yaml. For local development, MASSIVE_API_KEY (via .env) takes precedence.
+The API key is never stored in code or app.yaml. MASSIVE_API_KEY takes
+precedence: on Databricks Apps a secret *resource* injects it (see the
+`valueFrom` entry in app.yaml), locally it comes from .env. Failing that, the key
+is read from a Databricks secret scope (see setup_secrets.py) via the SDK.
 """
 
 import base64
+import logging
 import os
 from functools import lru_cache
 from typing import Any
 
 import requests
 from databricks.sdk import WorkspaceClient
+
+logger = logging.getLogger(__name__)
 
 _SCOPE = os.environ.get("MASSIVE_SECRET_SCOPE", "massive")
 _KEY = os.environ.get("MASSIVE_SECRET_KEY", "api-key")
@@ -28,11 +32,21 @@ def _client() -> WorkspaceClient:
     return WorkspaceClient()
 
 
+@lru_cache(maxsize=1)
 def _get_api_key() -> str:
-    """Return the Massive API key from the env var or the Databricks secret scope."""
+    """Return the Massive API key from the env var or the Databricks secret scope.
+
+    Cached because MassiveClient.__init__ calls this, and the routes construct a
+    fresh client per request - so the secret-scope branch would otherwise cost a
+    Databricks API round trip on every /sync, /news/sync and POST /watchlist.
+
+    Logs which source won, never the key itself.
+    """
     key = os.environ.get("MASSIVE_API_KEY")
     if key:
+        logger.info("Massive API key resolved from the MASSIVE_API_KEY environment variable")
         return key
+    logger.info("Massive API key resolved from secret scope %s/%s", _SCOPE, _KEY)
     secret = _client().secrets.get_secret(scope=_SCOPE, key=_KEY)
     return base64.b64decode(secret.value).decode("utf-8")
 

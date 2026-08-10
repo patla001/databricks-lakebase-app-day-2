@@ -3,16 +3,41 @@ command:
   - "app.py"
 
 env:
+  # --- Credentials, injected by the Databricks platform ---------------------
+  # `valueFrom` names an *app resource*, not a secret scope. Add the resources
+  # first (app page > Edit > App resources > + Add resource > Secret), giving
+  # each the resource key used below:
+  #
+  #   resource key      scope       key            permission
+  #   lakebase-url      database    lakebase-url   Can read
+  #   massive-api-key   massive     api-key        Can read
+  #
+  # Databricks resolves each to the DECRYPTED secret value and sets it as this
+  # env var, so no credential is ever in this file or in git. Adding the
+  # resource also grants the app's service principal read on that secret -
+  # which is why no `databricks secrets put-acl` step is needed.
+  - name: LAKEBASE_URL
+    valueFrom: lakebase-url
+  - name: MASSIVE_API_KEY
+    valueFrom: massive-api-key
+
+  # --- Fallback: read the secrets through the SDK ---------------------------
+  # Only used if the resources above are missing, in which case lakebase.py and
+  # massive_client.py fetch from these scopes themselves. That path needs the
+  # service principal to hold READ on both scopes. The app logs which source it
+  # actually used at startup.
   - name: LAKEBASE_SECRET_SCOPE
     value: "database"
   - name: LAKEBASE_SECRET_KEY
     value: "lakebase-url"
-  - name: MASSIVE_API_BASE_URL
-    value: "https://api.massive.com"
   - name: MASSIVE_SECRET_SCOPE
     value: "massive"
   - name: MASSIVE_SECRET_KEY
     value: "api-key"
+
+  # --- Non-secret configuration --------------------------------------------
+  - name: MASSIVE_API_BASE_URL
+    value: "https://api.massive.com"
   # Never run Flask's debug server / interactive reloader in the deployed app.
   - name: FLASK_DEBUG
     value: "0"

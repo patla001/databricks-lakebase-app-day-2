@@ -18,6 +18,7 @@ import requests
 from databricks.sdk import WorkspaceClient
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
+from werkzeug.exceptions import HTTPException
 
 # Load .env before any os.environ reads below, so local development can
 # override the Databricks secret scope with LAKEBASE_URL / MASSIVE_API_KEY.
@@ -143,12 +144,23 @@ def healthz():
 @app.errorhandler(Exception)
 def handle_exception(err):
     """Ensure all unhandled errors return JSON (not an HTML error page),
-    so the frontend's resp.json() call never chokes on HTML."""
+    so the frontend's resp.json() call never chokes on HTML.
+
+    The response deliberately does NOT include str(err). Exception text routinely
+    carries credentials: a psycopg2 connection failure puts the entire DSN,
+    password and all, into its message. Full detail goes to the logs instead.
+
+    HTTPExceptions are the exception - their descriptions are authored by Flask
+    or by us (404, 405, and anything from abort()), so they carry no internals
+    and are worth returning. Routes that reject bad input do so with an explicit
+    `return jsonify(...), 400` and never reach this handler at all.
+    """
+    if isinstance(err, HTTPException):
+        logger.info("HTTP %s on %s: %s", err.code, request.path, err.description)
+        return jsonify({"error": err.description}), err.code
+
     logger.exception("Unhandled exception while processing request")
-    status_code = getattr(err, "code", 500)
-    if not isinstance(status_code, int):
-        status_code = 500
-    return jsonify({"error": str(err)}), status_code
+    return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route("/")

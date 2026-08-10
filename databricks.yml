@@ -2,6 +2,27 @@
 # Deploy with: databricks bundle deploy -t dev   (or -t prod)
 # This wires up the ticker-news embeddings notebook as a scheduled Workflow
 # (see resources/lakebase_embeddings_job.yml).
+#
+# The workspace host is deliberately NOT hardcoded here. Earlier revisions
+# carried a `host: https://<your-workspace-instance>.cloud.databricks.com`
+# placeholder, and because the CLI reads this file for *every* command run from
+# this directory, that placeholder broke unrelated commands too:
+#
+#   $ databricks current-user me
+#   Error: default auth: cannot configure default credentials
+#          Config: host=https://<your-workspace-instance>.cloud.databricks.com
+#
+# With `workspace.host` omitted the CLI falls back to standard unified auth, so
+# point it at your workspace with either:
+#
+#   export DATABRICKS_HOST=https://<your-workspace>.cloud.databricks.com
+#   export DATABRICKS_TOKEN=<your-pat>
+#
+# or a named profile in ~/.databrickscfg:
+#
+#   databricks bundle deploy -t dev -p <profile>
+#
+# Check what will be used with: databricks bundle validate -t dev
 
 bundle:
   name: databricks-lakebase-app-day-2
@@ -13,11 +34,8 @@ targets:
   dev:
     mode: development
     default: true
-    workspace:
-      host: https://<your-workspace-instance>.cloud.databricks.com
 
   prod:
     mode: production
     workspace:
-      host: https://<your-workspace-instance>.cloud.databricks.com
       root_path: /Shared/.bundle/${bundle.name}/${bundle.target}
