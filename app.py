@@ -169,6 +169,12 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/search-ui")
+def search_ui():
+    """UI for semantic vector search over embedded news documents."""
+    return render_template("search.html")
+
+
 @app.route("/records")
 def list_records():
     """Read records already synced into Lakebase."""
